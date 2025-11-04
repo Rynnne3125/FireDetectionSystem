@@ -1,0 +1,158 @@
+# Hướng dẫn hệ thống báo cháy thông minh với AI Hybrid
+
+## Tổng quan hệ thống
+Hệ thống báo cháy thông minh sử dụng kiến trúc hybrid kết hợp:
+- **Computer Vision AI** (ESP32-CAM) để phát hiện cháy qua hình ảnh
+- **Cảm biến truyền thống** (MQ2, DHT11) để cảnh báo sớm
+- **Điều khiển tự động** (Motor step, vòi phun) để chữa cháy
+
+## 1. Cài đặt Cloud AI Server
+- Cài Python 3.8+
+- Cài các thư viện:
+  ```bash
+  cd CloudAI_Server
+  pip install -r requirements.txt
+  ```
+- Cấu hình MQTT broker (có thể dùng Mosquitto):
+  ```bash
+  # Ubuntu/Debian
+  sudo apt install mosquitto mosquitto-clients
+  
+  # Windows
+  # Tải từ: https://mosquitto.org/download/
+  ```
+- Chỉnh sửa `main.py`:
+  - Thay `MQTT_BROKER` bằng IP máy chạy MQTT broker
+  - Cấu hình ngưỡng cảnh báo phù hợp
+- Chạy server:
+  ```bash
+  python main.py
+  ```
+
+## 2. Cấu hình ESP32-CAM
+- Cài thư viện ArduinoJson trong Arduino IDE
+- Chỉnh sửa `CameraWebServer.ino`:
+  - Cập nhật WiFi credentials
+  - Thay `cloud_server` thành địa chỉ server cloud
+- Nạp code cho ESP32-CAM
+- Kiểm tra kết nối qua Serial Monitor
+
+## 3. Cấu hình ESP8266 Sensor (canhbaogass)
+- Cài thư viện PubSubClient và ArduinoJson
+- Chỉnh sửa `canhbaogass.ino`:
+  - Cập nhật WiFi credentials
+  - Thay `mqtt_server` thành IP MQTT broker
+  - Cấu hình ngưỡng cảnh báo phù hợp
+- Kết nối cảm biến:
+  - MQ2: Pin A0
+  - DHT11: Pin D3
+  - Vòi phun: Pin D7
+  - Còi báo: Pin D1
+- Nạp code cho ESP8266
+
+## 4. Cấu hình ESP8266 Controller (FireDetection_Controller)
+- Cài thư viện AccelStepper, SimpleKalmanFilter, PubSubClient, ArduinoJson
+- Chỉnh sửa `FireDetection_Controller.ino`:
+  - Cập nhật WiFi credentials
+  - Thay `mqtt_server` thành IP MQTT broker
+- Kết nối phần cứng:
+  - Motor X: Step=D5, Dir=D3, Enable=D2
+  - Motor Y: Step=D6, Dir=D7, Enable=D8
+  - Vòi phun: Pin D1
+  - Còi báo: Pin D4
+- Nạp code cho ESP8266
+
+## 5. Cấu hình Blynk App
+- Tạo project mới với template ID tương ứng
+- Cấu hình Virtual Pins:
+  - V0: MQ2 sensor value
+  - V1: Temperature
+  - V2: Humidity
+  - V3: Manual sprinkler control
+  - V4: Manual alarm control
+  - V5: System reset
+- Cập nhật Auth token trong code
+
+## 6. Kiểm tra hệ thống
+
+### Kiểm tra từng thành phần:
+1. **ESP32-CAM**: Truy cập IP camera để xem stream
+2. **ESP8266 Sensor**: Kiểm tra Serial Monitor để xem dữ liệu cảm biến
+3. **ESP8266 Controller**: Kiểm tra kết nối MQTT và điều khiển motor
+4. **Cloud AI Server**: Kiểm tra log server và API endpoints
+
+### Test tích hợp:
+1. **Test cảm biến**: Thổi khói vào MQ2, kiểm tra cảnh báo
+2. **Test AI**: Đưa ảnh có lửa vào camera, kiểm tra phát hiện
+3. **Test điều khiển**: Kiểm tra motor xoay và vòi phun hoạt động
+4. **Test Blynk**: Kiểm tra điều khiển từ app
+
+## 7. Luồng hoạt động
+
+### Bình thường:
+- Cảm biến đọc dữ liệu liên tục
+- Camera chụp ảnh mỗi 5 giây
+- AI phân tích ảnh với độ tin cậy thấp
+
+### Khi có cảnh báo:
+- Cảm biến phát hiện khói/nhiệt độ cao
+- Tăng tần suất chụp ảnh lên 1 giây
+- AI tăng độ nhạy phân tích
+- Nếu xác nhận cháy → Kích hoạt toàn bộ hệ thống
+
+### Khi phát hiện cháy:
+- AI xác định vị trí cháy trong ảnh
+- Tính toán góc xoay camera/vòi phun
+- Gửi lệnh MQTT điều khiển motor
+- Kích hoạt vòi phun và còi báo
+- Tự động tắt sau 30-60 giây
+
+## 8. Troubleshooting
+
+### Camera không hoạt động:
+- Kiểm tra kết nối WiFi
+- Xác nhận địa chỉ server
+- Kiểm tra PSRAM configuration
+
+### MQTT không kết nối:
+- Kiểm tra broker address và port
+- Xác nhận firewall không chặn port 1883
+- Kiểm tra WiFi connection
+
+### Cảm biến không đọc được:
+- Kiểm tra kết nối pin
+- Calibrate ngưỡng cảnh báo
+- Kiểm tra nguồn điện
+
+### Motor không xoay:
+- Kiểm tra kết nối driver motor
+- Xác nhận cấu hình pin
+- Kiểm tra nguồn điện motor
+
+## 9. Mở rộng
+
+### Tính năng bổ sung:
+- [ ] Machine Learning model training
+- [ ] Database logging
+- [ ] Mobile app notification
+- [ ] Multi-camera support
+- [ ] Weather integration
+
+### Tích hợp:
+- [ ] Home Assistant
+- [ ] Google Assistant
+- [ ] Telegram bot
+- [ ] Email alerts
+
+## 10. API Endpoints
+
+### Cloud AI Server:
+- `POST /upload`: Gửi ảnh để phân tích
+- `POST /sensor_data`: Gửi dữ liệu cảm biến
+- `GET /status`: Lấy trạng thái hệ thống
+- `POST /control`: Điều khiển thủ công
+
+### MQTT Topics:
+- `fire/command`: Lệnh điều khiển
+- `fire/sensor`: Dữ liệu cảm biến
+- `fire/status`: Trạng thái hệ thống
