@@ -1,10 +1,16 @@
-Flask==2.3.3
+flask==3.0.0
+flask-socketio==5.3.5
+python-socketio==5.10.0
 paho-mqtt==1.6.1
-opencv-python-headless==4.8.1.78
+ultralytics==8.1.0
+opencv-python==4.8.1.78
+pillow>=10.2.0
 numpy==1.24.3
-torch==2.0.1
-torchvision==0.15.2
-ultralytics==8.0.196
-Pillow==10.0.0
-requests==2.31.0
-python-dotenv==1.0.0
+torch==2.1.0
+torchvision==0.16.0
+
+# Chọn 1 trong 2:
+# Option 1: Threading (không cần cài gì thêm) - RECOMMENDED
+# Option 2: Gevent (nếu muốn async performance tốt hơn)
+gevent==23.9.1
+gevent-websocket==0.10.1

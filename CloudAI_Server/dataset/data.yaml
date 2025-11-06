@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 2
+names: ['0', '1']
+
+roboflow:
+  workspace: khalid-zpnvl
+  project: fire-and-smoke-k8f3q
+  version: 1
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/khalid-zpnvl/fire-and-smoke-k8f3q/dataset/1

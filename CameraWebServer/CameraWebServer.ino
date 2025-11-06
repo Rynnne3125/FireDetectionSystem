@@ -1,44 +1,103 @@
-
-#include <Arduino.h>
-#include "esp_camera.h"
 #include <WiFi.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+#include <HTTPClient.h>
+#include <base64.h>
+#include "esp_camera.h"
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
 
-
-// ===================
-// Select camera model
-// ===================
-//#define CAMERA_MODEL_WROVER_KIT // Has PSRAM
-//#define CAMERA_MODEL_ESP_EYE // Has PSRAM
-//#define CAMERA_MODEL_ESP32S3_EYE // Has PSRAM
-//#define CAMERA_MODEL_M5STACK_PSRAM // Has PSRAM
-//#define CAMERA_MODEL_M5STACK_V2_PSRAM // M5Camera version B Has PSRAM
-//#define CAMERA_MODEL_M5STACK_WIDE // Has PSRAM
-//#define CAMERA_MODEL_M5STACK_ESP32CAM // No PSRAM
-//#define CAMERA_MODEL_M5STACK_UNITCAM // No PSRAM
-#define CAMERA_MODEL_AI_THINKER // Has PSRAM
-//#define CAMERA_MODEL_TTGO_T_JOURNAL // No PSRAM
-//#define CAMERA_MODEL_XIAO_ESP32S3 // Has PSRAM
-// ** Espressif Internal Boards **
-//#define CAMERA_MODEL_ESP32_CAM_BOARD
-//#define CAMERA_MODEL_ESP32S2_CAM_BOARD
-//#define CAMERA_MODEL_ESP32S3_CAM_LCD
-//#define CAMERA_MODEL_DFRobot_FireBeetle2_ESP32S3 // Has PSRAM
-//#define CAMERA_MODEL_DFRobot_Romeo_ESP32S3 // Has PSRAM
-#include "camera_pins.h"
-
-// ===========================
-// Enter your WiFi credentials
-// ===========================
+// ===== WIFI & MQTT CONFIG =====
 const char* ssid = "Phong";
 const char* password = "rintran3125";
-void startCameraServer();
-void setupLedFlash(int pin);
+const char* mqtt_server = "10.120.93.83";
+const int mqtt_port = 1883;
+const char* cloud_server = "http://10.120.93.83:5000/upload";
+
+// MQTT Topics
+const char* topic_camera = "fire/camera";
+const char* topic_command = "fire/command";
+
+WiFiClient espClient;
+PubSubClient mqtt(espClient);
+HTTPClient http;
+
+// ===== CAMERA PINS (AI-THINKER ESP32-CAM) =====
+#define PWDN_GPIO_NUM     32
+#define RESET_GPIO_NUM    -1
+#define XCLK_GPIO_NUM      0
+#define SIOD_GPIO_NUM     26
+#define SIOC_GPIO_NUM     27
+#define Y9_GPIO_NUM       35
+#define Y8_GPIO_NUM       34
+#define Y7_GPIO_NUM       39
+#define Y6_GPIO_NUM       36
+#define Y5_GPIO_NUM       21
+#define Y4_GPIO_NUM       19
+#define Y3_GPIO_NUM       18
+#define Y2_GPIO_NUM        5
+#define VSYNC_GPIO_NUM    25
+#define HREF_GPIO_NUM     23
+#define PCLK_GPIO_NUM     22
+
+// ===== SYSTEM STATE =====
+bool alertMode = false;
+unsigned long lastCapture = 0;
+unsigned long captureInterval = 5000;  // 5 giây bình thường
+const unsigned long alertCaptureInterval = 1000;  // 1 giây khi có cảnh báo
+
+// ===== FUNCTION PROTOTYPES =====
+void setupCamera();
+void setupWiFi();
+void setupMQTT();
+void reconnectMQTT();
+void captureAndSend();
+void sendImageHTTP(camera_fb_t* fb);
+void sendImageMQTT(camera_fb_t* fb);
+void mqttCallback(char* topic, byte* payload, unsigned int length);
 
 void setup() {
   Serial.begin(115200);
-  Serial.setDebugOutput(true);
-  Serial.println();
+  Serial.println("\n🔥 ESP32-CAM Fire Detection System");
+  
+  // Tắt brownout detector
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
+  
+  // Setup camera
+  setupCamera();
+  
+  // Setup WiFi
+  setupWiFi();
+  
+  // Setup MQTT
+  setupMQTT();
+  
+  Serial.println("✅ System ready!");
+}
 
+void loop() {
+  // Duy trì kết nối MQTT
+  if (!mqtt.connected()) {
+    reconnectMQTT();
+  }
+  mqtt.loop();
+  
+  // Chụp và gửi ảnh theo interval
+  unsigned long currentMillis = millis();
+  unsigned long interval = alertMode ? alertCaptureInterval : captureInterval;
+  
+  if (currentMillis - lastCapture >= interval) {
+    lastCapture = currentMillis;
+    captureAndSend();
+  }
+  
+  delay(10);
+}
+
+// ===== SETUP CAMERA =====
+void setupCamera() {
+  Serial.println("📷 Configuring camera...");
+  
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -54,240 +113,223 @@ void setup() {
   config.pin_pclk = PCLK_GPIO_NUM;
   config.pin_vsync = VSYNC_GPIO_NUM;
   config.pin_href = HREF_GPIO_NUM;
-  config.pin_sccb_sda = SIOD_GPIO_NUM;
-  config.pin_sccb_scl = SIOC_GPIO_NUM;
+  config.pin_sscb_sda = SIOD_GPIO_NUM;
+  config.pin_sscb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.frame_size = FRAMESIZE_UXGA;
-  config.pixel_format = PIXFORMAT_JPEG; // for streaming
-  //config.pixel_format = PIXFORMAT_RGB565; // for face detection/recognition
-  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
-  config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 12;
-  config.fb_count = 1;
+  config.pixel_format = PIXFORMAT_JPEG;
   
-  // if PSRAM IC present, init with UXGA resolution and higher JPEG quality
-  //                      for larger pre-allocated frame buffer.
-  if(config.pixel_format == PIXFORMAT_JPEG){
-    if(psramFound()){
-      config.jpeg_quality = 10;
-      config.fb_count = 2;
-      config.grab_mode = CAMERA_GRAB_LATEST;
-    } else {
-      // Limit the frame size when PSRAM is not available
-      config.frame_size = FRAMESIZE_SVGA;
-      config.fb_location = CAMERA_FB_IN_DRAM;
-    }
-  } else {
-    // Best option for face detection/recognition
-    config.frame_size = FRAMESIZE_240X240;
-#if CONFIG_IDF_TARGET_ESP32S3
+  // Cấu hình chất lượng ảnh
+  if(psramFound()){
+    config.frame_size = FRAMESIZE_VGA;  // 640x480
+    config.jpeg_quality = 10;  // 0-63, thấp hơn = chất lượng cao hơn
     config.fb_count = 2;
-#endif
+  } else {
+    config.frame_size = FRAMESIZE_SVGA;
+    config.jpeg_quality = 12;
+    config.fb_count = 1;
   }
-
-#if defined(CAMERA_MODEL_ESP_EYE)
-  pinMode(13, INPUT_PULLUP);
-  pinMode(14, INPUT_PULLUP);
-#endif
-
-  // camera init
+  
+  // Khởi tạo camera
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
-    Serial.printf("Camera init failed with error 0x%x", err);
-    return;
+    Serial.printf("❌ Camera init failed: 0x%x\n", err);
+    delay(1000);
+    ESP.restart();
   }
-
-  sensor_t * s = esp_camera_sensor_get();
-  // initial sensors are flipped vertically and colors are a bit saturated
-  if (s->id.PID == OV3660_PID) {
-    s->set_vflip(s, 1); // flip it back
-    s->set_brightness(s, 1); // up the brightness just a bit
-    s->set_saturation(s, -2); // lower the saturation
-  }
-  // drop down frame size for higher initial frame rate
-  if(config.pixel_format == PIXFORMAT_JPEG){
-    s->set_framesize(s, FRAMESIZE_QVGA);
-  }
-
-#if defined(CAMERA_MODEL_M5STACK_WIDE) || defined(CAMERA_MODEL_M5STACK_ESP32CAM)
-  s->set_vflip(s, 1);
-  s->set_hmirror(s, 1);
-#endif
-
-#if defined(CAMERA_MODEL_ESP32S3_EYE)
-  s->set_vflip(s, 1);
-#endif
-
-// Setup LED FLash if LED pin is defined in camera_pins.h
-#if defined(LED_GPIO_NUM)
-  setupLedFlash(LED_GPIO_NUM);
-#endif
-
-  WiFi.begin(ssid, password);
-  WiFi.setSleep(false);
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("");
-  Serial.println("WiFi connected");
-
-  startCameraServer();
-
-  Serial.print("Camera Ready! Use 'http://");
-  Serial.print(WiFi.localIP());
-  Serial.println("' to connect");
+  
+  // Điều chỉnh sensor
+  sensor_t* s = esp_camera_sensor_get();
+  s->set_brightness(s, 0);     // -2 to 2
+  s->set_contrast(s, 0);       // -2 to 2
+  s->set_saturation(s, 0);     // -2 to 2
+  s->set_special_effect(s, 0); // 0 to 6 (0 - No Effect)
+  s->set_whitebal(s, 1);       // 0 = disable , 1 = enable
+  s->set_awb_gain(s, 1);       // 0 = disable , 1 = enable
+  s->set_wb_mode(s, 0);        // 0 to 4
+  s->set_exposure_ctrl(s, 1);  // 0 = disable , 1 = enable
+  s->set_aec2(s, 0);           // 0 = disable , 1 = enable
+  s->set_gain_ctrl(s, 1);      // 0 = disable , 1 = enable
+  s->set_agc_gain(s, 0);       // 0 to 30
+  s->set_gainceiling(s, (gainceiling_t)0);  // 0 to 6
+  s->set_bpc(s, 0);            // 0 = disable , 1 = enable
+  s->set_wpc(s, 1);            // 0 = disable , 1 = enable
+  s->set_raw_gma(s, 1);        // 0 = disable , 1 = enable
+  s->set_lenc(s, 1);           // 0 = disable , 1 = enable
+  s->set_hmirror(s, 0);        // 0 = disable , 1 = enable
+  s->set_vflip(s, 0);          // 0 = disable , 1 = enable
+  
+  Serial.println("✅ Camera configured successfully");
 }
 
-// --- Thông tin server cloud ---
-#include <WiFiClient.h>
-#include <HTTPClient.h>
-#include <ArduinoJson.h>
+// ===== SETUP WIFI =====
+void setupWiFi() {
+  Serial.print("📡 Connecting to WiFi");
+  WiFi.begin(ssid, password);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n✅ WiFi connected!");
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\n❌ WiFi connection failed!");
+    delay(3000);
+    ESP.restart();
+  }
+}
 
-const char* cloud_server = "http://172.19.0.83/upload"; // Địa chỉ server cloud thực tế
-const char* status_server = "http://172.19.0.83/status";
+// ===== SETUP MQTT =====
+void setupMQTT() {
+  mqtt.setServer(mqtt_server, mqtt_port);
+  mqtt.setCallback(mqttCallback);
+  mqtt.setBufferSize(30000);  // Tăng buffer cho ảnh lớn
+}
 
-// --- System State ---
-int alertLevel = 0;  // 0: Normal, 1: Warning, 2: Critical
-bool fireDetected = false;
-unsigned long lastFireTime = 0;
+// ===== RECONNECT MQTT =====
+void reconnectMQTT() {
+  while (!mqtt.connected()) {
+    Serial.print("🔄 Connecting to MQTT...");
+    
+    String clientId = "ESP32CAM-" + String(random(0xffff), HEX);
+    
+    if (mqtt.connect(clientId.c_str())) {
+      Serial.println("✅ MQTT connected!");
+      mqtt.subscribe(topic_command);
+      Serial.printf("📡 Subscribed to: %s\n", topic_command);
+    } else {
+      Serial.printf("❌ Failed, rc=%d. Retry in 5s\n", mqtt.state());
+      delay(5000);
+    }
+  }
+}
 
-void sendImageToCloud() {
-  camera_fb_t * fb = esp_camera_fb_get();
+// ===== MQTT CALLBACK =====
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  Serial.printf("📨 Message from: %s\n", topic);
+  
+  // Parse JSON
+  StaticJsonDocument<256> doc;
+  DeserializationError error = deserializeJson(doc, payload, length);
+  
+  if (error) {
+    Serial.println("❌ JSON parsing failed");
+    return;
+  }
+  
+  const char* command = doc["command"];
+  
+  if (strcmp(command, "INCREASE_CAPTURE_RATE") == 0) {
+    Serial.println("⚠️ Alert mode activated - increasing capture rate");
+    alertMode = true;
+  } 
+  else if (strcmp(command, "RESET_SYSTEM") == 0) {
+    Serial.println("🔄 Reset command received");
+    alertMode = false;
+    captureInterval = 5000;
+  }
+}
+
+// ===== CAPTURE AND SEND IMAGE =====
+void captureAndSend() {
+  Serial.println("📸 Capturing image...");
+  
+  // Chụp ảnh
+  camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) {
     Serial.println("❌ Camera capture failed");
     return;
   }
   
-  if ((WiFi.status() == WL_CONNECTED)) {
-    HTTPClient http;
-    http.begin(cloud_server);
-    http.addHeader("Content-Type", "multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW");
-    
-    // Create multipart form data with proper image data
-    String body = "------WebKitFormBoundary7MA4YWxkTrZu0gW\r\n";
-    body += "Content-Disposition: form-data; name=\"image\"; filename=\"capture.jpg\"\r\n";
-    body += "Content-Type: image/jpeg\r\n\r\n";
-    
-    // Add image data
-    String imageData = "";
-    for (size_t i = 0; i < fb->len; i++) {
-      imageData += (char)fb->buf[i];
-    }
-    body += imageData;
-    body += "\r\n";
-    
-    // Add sensor data if available (simulated for now)
-    if (alertLevel > 0) {
-      body += "------WebKitFormBoundary7MA4YWxkTrZu0gW\r\n";
-      body += "Content-Disposition: form-data; name=\"sensor_data\"\r\n\r\n";
-      body += "{\"smoke\":500,\"temperature\":45,\"humidity\":60}\r\n";
-    }
-    
-    body += "\r\n------WebKitFormBoundary7MA4YWxkTrZu0gW--\r\n";
-    
-    Serial.printf("📸 Sending image to cloud server...\n");
-    Serial.printf("📊 Image size: %d bytes\n", fb->len);
-    Serial.printf("📊 Body size: %d bytes\n", body.length());
-    
-    // Send request
-    int httpCode = http.POST(body);
-    
-    if (httpCode > 0) {
-      String response = http.getString();
-      Serial.printf("✅ [HTTP] POST... code: %d\n", httpCode);
-      Serial.printf("📄 Response: %s\n", response.c_str());
-      processAIResponse(response);
-    } else {
-      Serial.printf("❌ [HTTP] POST... failed, error: %s\n", http.errorToString(httpCode).c_str());
-    }
-    
-    http.end();
-  } else {
-    Serial.println("❌ WiFi not connected");
-  }
+  Serial.printf("✅ Image captured: %d bytes\n", fb->len);
   
+  // Gửi qua HTTP (ưu tiên vì ổn định hơn với ảnh lớn)
+  sendImageHTTP(fb);
+  
+  // Hoặc gửi qua MQTT (dùng cho ảnh nhỏ)
+  // sendImageMQTT(fb);
+  
+  // Giải phóng buffer
   esp_camera_fb_return(fb);
 }
 
-void processAIResponse(String response) {
-  Serial.printf("🤖 Processing AI response: %s\n", response.c_str());
-  
-  // Parse JSON response
-  DynamicJsonDocument doc(1024);
-  DeserializationError error = deserializeJson(doc, response);
-  
-  if (error) {
-    Serial.print("❌ JSON parsing failed: ");
-    Serial.println(error.c_str());
+// ===== SEND IMAGE VIA HTTP =====
+void sendImageHTTP(camera_fb_t* fb) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("❌ WiFi not connected");
     return;
   }
   
-  bool fireDetected = doc["fire_detected"];
-  float confidence = doc["confidence"];
+  // Encode base64
+  String base64Image = base64::encode(fb->buf, fb->len);
   
-  if (fireDetected) {
-    ::fireDetected = true;
-    lastFireTime = millis();
-    alertLevel = 2; // Critical
+  // Tạo JSON
+  StaticJsonDocument<50000> doc;
+  doc["image"] = base64Image;
+  doc["timestamp"] = millis();
+  doc["source"] = "ESP32-CAM";
+  
+  String jsonString;
+  serializeJson(doc, jsonString);
+  
+  // Gửi HTTP POST
+  http.begin(cloud_server);
+  http.addHeader("Content-Type", "application/json");
+  
+  Serial.println("📤 Sending image to cloud...");
+  int httpCode = http.POST(jsonString);
+  
+  if (httpCode > 0) {
+    Serial.printf("✅ HTTP Response: %d\n", httpCode);
     
-    Serial.printf("🔥 FIRE DETECTED! Confidence: %.2f\n", confidence);
-    
-    // Flash LED to indicate fire
-    setLedFlash(true);
-    delay(100);
-    setLedFlash(false);
-    
-    // Get fire position if available
-    if (doc.containsKey("fire_position")) {
-      int x = doc["fire_position"][0];
-      int y = doc["fire_position"][1];
-      Serial.printf("📍 Fire position: (%d, %d)\n", x, y);
-    }
-    
-    // Get camera angles if available
-    if (doc.containsKey("camera_angles")) {
-      float angleX = doc["camera_angles"]["x"];
-      float angleY = doc["camera_angles"]["y"];
-      Serial.printf("📐 Camera angles: X=%.1f°, Y=%.1f°\n", angleX, angleY);
+    if (httpCode == HTTP_CODE_OK) {
+      String response = http.getString();
+      Serial.println("Response: " + response);
+      
+      // Parse response để biết có lửa không
+      StaticJsonDocument<256> responseDoc;
+      deserializeJson(responseDoc, response);
+      bool fireDetected = responseDoc["fire_detected"];
+      
+      if (fireDetected) {
+        Serial.println("🔥 FIRE DETECTED BY AI!");
+        alertMode = true;
+      }
     }
   } else {
-    Serial.printf("✅ No fire detected. Confidence: %.2f\n", confidence);
-    
-    // Gradually reduce alert level
-    if (alertLevel > 0 && millis() - lastFireTime > 30000) { // 30 seconds
-      alertLevel = max(0, alertLevel - 1);
-      ::fireDetected = false;
-      Serial.println("🔄 Alert level reduced");
-    }
+    Serial.printf("❌ HTTP Error: %s\n", http.errorToString(httpCode).c_str());
   }
+  
+  http.end();
 }
 
-unsigned long lastSend = 0;
-const unsigned long sendInterval = 5000; // gửi ảnh mỗi 5 giây
-
-// Định nghĩa đơn giản: chỉ khởi tạo pin LED flash như OUTPUT và tắt (không dùng LEDC/PWM)
-void setupLedFlash(int pin) {
-  if (pin >= 0) {
-    pinMode(pin, OUTPUT);
-    digitalWrite(pin, LOW); // ban đầu tắt đèn
+// ===== SEND IMAGE VIA MQTT (Alternative) =====
+void sendImageMQTT(camera_fb_t* fb) {
+  // Encode base64
+  String base64Image = base64::encode(fb->buf, fb->len);
+  
+  // Tạo JSON
+  StaticJsonDocument<50000> doc;
+  doc["image"] = base64Image;
+  doc["timestamp"] = millis();
+  
+  String jsonString;
+  serializeJson(doc, jsonString);
+  
+  // Gửi MQTT
+  Serial.println("📤 Sending image via MQTT...");
+  bool sent = mqtt.publish(topic_camera, jsonString.c_str(), false);
+  
+  if (sent) {
+    Serial.println("✅ Image sent successfully");
+  } else {
+    Serial.println("❌ MQTT publish failed");
   }
-}
-
-// Hàm tiện ích để bật/tắt LED flash sau này (sử dụng digitalWrite)
-void setLedFlash(bool on) {
-#if defined(LED_GPIO_NUM)
-  digitalWrite(LED_GPIO_NUM, on ? HIGH : LOW);
-#endif
-}
-
-void loop() {
-  if (millis() - lastSend > sendInterval) {
-    sendImageToCloud();
-    lastSend = millis();
-  }
-  delay(100);
 }

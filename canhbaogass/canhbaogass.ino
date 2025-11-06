@@ -1,20 +1,21 @@
 
 #define BLYNK_PRINT Serial
 #include <ESP8266WiFi.h>
-#define BLYNK_TEMPLATE_ID "TMPL6Nn3f5huh"
-#define BLYNK_TEMPLATE_NAME "Quickstart Template"
+#define BLYNK_TEMPLATE_ID "TMPL6dOEP0Eo7"
+#define BLYNK_TEMPLATE_NAME "ESP32CAM"
+#define BLYNK_AUTH_TOKEN "pkELg0f-LZJk9_9wtgC0bt4SzmJpznyw"
 
 #include <BlynkSimpleEsp8266.h>
 #include <DHT.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 
-char auth[] = "qGubvkBdm5Kr4ThlKh690-6VOFj-bDlI";
+char auth[] = "pkELg0f-LZJk9_9wtgC0bt4SzmJpznyw";
 char ssid[] = "Phong";//Enter your WIFI name
 char pass[] = "rintran3125";//Enter your WIFI password
 
 // MQTT Configuration
-const char* mqtt_server = "172.19.0.83";
+const char* mqtt_server = "10.120.93.83";
 const int mqtt_port = 1883;
 const char* mqtt_topic_sensor = "fire/sensor";
 const char* mqtt_topic_command = "fire/command";
