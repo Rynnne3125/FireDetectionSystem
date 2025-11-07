@@ -210,11 +210,6 @@ void checkAlertConditions() {
     alert_level = max(alert_level, 1); // Warning
   }
   
-  // Check humidity (high humidity can indicate fire)
-  if (humidity > HUMIDITY_THRESHOLD) {
-    should_alert = true;
-    alert_level = max(alert_level, 1); // Warning
-  }
   
   // Activate/deactivate alert
   if (should_alert && !alert_active) {

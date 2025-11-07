@@ -23,6 +23,7 @@ MQTT_TOPIC_COMMAND = 'fire/command'
 BLYNK_TOKEN = "pkELg0f-LZJk9_9wtgC0bt4SzmJpznyw"  # 🔹 Thay token của bạn
 BLYNK_BASE_URL = f"https://blynk.cloud/external/api"
 
+
 # Load YOLO Model
 print("🔥 Loading YOLO Fire Detection Model...")
 # FIX: Sử dụng model pretrained hoặc đường dẫn model của bạn
@@ -186,22 +187,43 @@ def on_message(client, userdata, msg):
         if topic == MQTT_TOPIC_SENSOR:
             payload_str = msg.payload.decode('utf-8')
             data = json.loads(payload_str)
-            print(f"🌡️ Sensor Data: Smoke={data.get('smoke')} ppm, Temp={data.get('temperature')}°C")
+            smoke = data.get("smoke")
+            temp = data.get("temperature")
+            hum = data.get("humidity")
 
-            # Cập nhật trạng thái hệ thống
+            print(f"🌡️ Sensor Data Received -> Smoke={smoke} ppm, Temp={temp}°C, Humidity={hum}%")
+            
+            # Lưu trạng thái cũ để so sánh (debounce / chỉ emit khi có thay đổi)
+            prev_alert = system_state.get("alert", False)
+            prev_smoke = system_state.get("smoke")
+            prev_temp = system_state.get("temperature")
+            prev_hum = system_state.get("humidity")
+
+            # Cập nhật trạng thái hệ thống (LƯU Ý: không lấy 'alert' từ device)
             system_state.update({
-                "smoke": data.get("smoke"),
-                "temperature": data.get("temperature"),
-                "humidity": data.get("humidity"),
-                "alert": data.get("alert", False),
+                "smoke": smoke,
+                "temperature": temp,
+                "humidity": hum,
                 "last_update": datetime.now().strftime("%H:%M:%S")
             })
 
-            # Gửi dữ liệu lên Web Dashboard (Socket.IO)
-            socketio.emit('sensor_update', system_state)
-
-            # Phân tích để cảnh báo sớm (smoke/temp cao)
+            # Phân tích và cập nhật flag alert trong system_state
             analyze_sensor_data(system_state)
+
+            # Emit chỉ khi có thay đổi quan trọng (hoặc luôn emit nếu bạn muốn)
+            changed = (
+                system_state.get("alert") != prev_alert or
+                system_state.get("smoke") != prev_smoke or
+                system_state.get("temperature") != prev_temp or
+                system_state.get("humidity") != prev_hum
+            )
+
+            if changed:
+                print(f"🔔 Emitting sensor_update (alert={system_state.get('alert')})")
+                socketio.emit('sensor_update', system_state)
+            else:
+                # Nếu muốn vẫn log cho debug
+                print("ℹ️ No significant change, skipping emit.")
 
         # 📷 Ảnh từ ESP32-CAM
         elif topic == MQTT_TOPIC_CAMERA:
@@ -251,19 +273,48 @@ def on_message(client, userdata, msg):
 
 # --- ANALYZE SENSOR DATA ---
 def analyze_sensor_data(state):
-    smoke = state["smoke"]
-    temp = state["temperature"]
-    
-    # Logic cảnh báo từ cảm biến
-    if smoke > 20 or temp > 30:
+    smoke = state.get("smoke", 0) or 0
+    temp = state.get("temperature", 0) or 0
+    hum = state.get("humidity", 0) or 0
+
+    # Thresholds (tùy bạn điều chỉnh)
+    SMOKE_LOW = 300   # nếu sensor khác, map lại scale
+    SMOKE_HIGH = 500
+    TEMP_LOW = 35.0
+    TEMP_HIGH = 40.0
+    HUM_THRESHOLD = 95.0  # optional
+
+    # logic kết hợp: ưu tiên khói + nhiệt
+    should_alert = False
+
+    # Giả sử smoke sensor trả về giá trị scale lớn (ví dụ 0-1023).
+    # Nếu bạn đang dùng giá trị nhỏ (ví dụ 18,20), map hoặc dùng thresholds phù hợp.
+    if (smoke and temp):
+        if (smoke > SMOKE_LOW and temp > TEMP_LOW) or (smoke > SMOKE_HIGH) or (temp > TEMP_HIGH):
+            should_alert = True
+    else:
+        # fallback: chỉ dựa vào nhiệt
+        if temp > TEMP_HIGH:
+            should_alert = True
+
+    # (Tuỳ chọn) ignore high humidity alone to avoid false positive
+    # if hum > HUM_THRESHOLD and not should_alert:
+    #     should_alert = False
+
+    if should_alert and not state.get("alert"):
         print("🚨 SENSOR ALERT! High smoke/temperature detected!")
         state["alert"] = True
-        
-        # Nếu chưa có xác nhận từ camera, tăng tần suất chụp
-        if not state["fire_detected"]:
+        # tăng tần suất chụp nếu cần
+        if not state.get("fire_detected"):
             command = {"command": "INCREASE_CAPTURE_RATE"}
             mqtt_client.publish(MQTT_TOPIC_COMMAND, json.dumps(command))
 
+    elif not should_alert and state.get("alert"):
+        # reset khi bình thường
+        print("✅ Sensor readings normalized.")
+        state["alert"] = False
+
+ 
 # --- ACTIVATE FIRE RESPONSE ---
 def activate_fire_response(fire_center):
     """
@@ -331,31 +382,44 @@ def get_status():
 
 @app.route('/upload', methods=['POST'])
 def upload_image():
-    import numpy as np, cv2, time
-    from datetime import datetime
-    image_bytes = request.data
-    npimg = np.frombuffer(image_bytes, np.uint8)
-    frame = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
-
-    # Dự đoán
-    results = yolo_model(frame)
-    fire_detected = len(results[0].boxes) > 0
-    center = (0, 0)
-    conf = 0.0
-    if fire_detected:
-        box = results[0].boxes[0]
-        center = [int((box.xyxy[0][0] + box.xyxy[0][2]) / 2),
-                  int((box.xyxy[0][1] + box.xyxy[0][3]) / 2)]
-        conf = float(box.conf[0])
-
-    response = {
-        "fire_detected": fire_detected,
-        "confidence": conf,
-        "location": center,
-        "timestamp": datetime.now().strftime("%H:%M:%S")
-    }
-    return jsonify(response)
-
+    """
+    Endpoint để ESP32-CAM gửi ảnh qua HTTP (alternative to MQTT)
+    """
+    try:
+        data = request.json
+        image_data = data.get('image')
+        
+        if not image_data:
+            return jsonify({"error": "No image data"}), 400
+        
+        # Phát hiện lửa
+        fire_detected, confidence, fire_center, annotated_img = detect_fire_yolo(image_data)
+        
+        # Cập nhật state
+        system_state.update({
+            "camera_alert": fire_detected,
+            "fire_confidence": confidence,
+            "fire_location": fire_center,
+            "last_image": annotated_img,
+            "last_update": datetime.now().strftime("%H:%M:%S")
+        })
+        
+        # Phát WebSocket
+        socketio.emit('camera_update', {
+            "image": annotated_img,
+            "fire_detected": fire_detected,
+            "confidence": confidence
+        })
+        
+        return jsonify({
+            "fire_detected": fire_detected,
+            "confidence": confidence,
+            "location": fire_center,
+            "timestamp": system_state["last_update"]
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/control', methods=['POST'])
 def manual_control():
